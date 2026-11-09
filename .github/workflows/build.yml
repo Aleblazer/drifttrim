@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    # net8.0-windows + WinForms and the MSI must build on Windows.
+    # Windows MIDI APIs, WinForms and the MSI must build on Windows.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -70,8 +70,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts/release | Out-Null
-          $portableName = "ZmkVolumeFader-$env:APP_VERSION-win-x64.exe"
-          $installerName = "ZmkVolumeFader-$env:APP_VERSION-win-x64.msi"
+          $portableName = "DriftTrim-$env:APP_VERSION-win-x64.exe"
+          $installerName = "DriftTrim-$env:APP_VERSION-win-x64.msi"
           Copy-Item artifacts/publish/ZmkVolumeFader.exe "artifacts/release/$portableName"
           $installer = Get-ChildItem Installer/bin -Filter $installerName -File -Recurse | Select-Object -First 1
           if ($null -eq $installer) { throw 'Installer build completed but the MSI could not be found.' }
@@ -85,7 +85,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
-          name: ZmkVolumeFader-win-x64-release
+          name: DriftTrim-win-x64-release
           path: artifacts/release/*
 
   release:
@@ -95,10 +95,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+
       - name: Download verified release assets
         uses: actions/download-artifact@v7
         with:
-          name: ZmkVolumeFader-win-x64-release
+          name: DriftTrim-win-x64-release
           path: artifacts/release
 
       - name: Create GitHub release
@@ -107,4 +109,7 @@ jobs:
         shell: pwsh
         run: |
           $assets = Get-ChildItem artifacts/release -File | Select-Object -ExpandProperty FullName
-          gh release create $env:GITHUB_REF_NAME $assets --repo $env:GITHUB_REPOSITORY --verify-tag --generate-notes --title "ZMK Volume Fader $env:GITHUB_REF_NAME"
+          $notes = "docs/releases/$env:GITHUB_REF_NAME.md"
+          $noteArgs = if (Test-Path -LiteralPath $notes) { @('--notes-file', $notes) } else { @('--generate-notes') }
+          gh release create $env:GITHUB_REF_NAME $assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "DriftTrim $env:GITHUB_REF_NAME" @noteArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -18,8 +18,8 @@ sealed class SetupDialog : Form
         public ItemKind Kind;
         public string DeviceKey = "";
         public string DeviceName = "";
-        public int Axis = -1;      // physical: captured HID axis index; -1 for virtual
-        public int Min, Max;       // physical: captured raw calibration range (mV)
+        public int Axis = -1;      // physical: captured source control index; -1 for virtual
+        public int Min, Max;       // physical: captured raw calibration range (source units)
         public int? SourceIndex;   // index into the `existing` list this row came from; null if newly added in this dialog
         public string Label = "";  // display name
     }
@@ -36,13 +36,14 @@ sealed class SetupDialog : Form
 
     readonly MainForm.Theme _t;
     readonly Func<string, int[]> _rawAxes;
-    readonly IReadOnlyList<DeviceOption> _devices;
+    readonly List<DeviceOption> _devices;
+    readonly Func<IReadOnlyList<DeviceOption>>? _refreshDevices;
+    long _lastDeviceRefresh;
     readonly Action<string?>? _deviceSelected;
     readonly Func<string, bool>? _sourceConnected;
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 40 };
 
     const int MaxAxes = 8;   // hid-io vendor report carries up to eight 16-bit axes
-    const int TravelThreshold = 1500;   // mV of sweep before we count a fader as "moved"
     const int W = 560, H = 440;
 
     // The working list (seeded from `existing`); Result is this order on Done.
@@ -52,12 +53,12 @@ sealed class SetupDialog : Form
     Mode _mode = Mode.List;
 
     // Capture state (only meaningful in Mode.Capture).
-    readonly int[] _min = new int[MaxAxes];
-    readonly int[] _max = new int[MaxAxes];
+    int[] _min = new int[MaxAxes];
+    int[] _max = new int[MaxAxes];
     readonly HashSet<string> _usedAxes = new(StringComparer.OrdinalIgnoreCase);
-    bool _haveBaseline;
     int _candidate = -1;
     int _editingIndex = -1;
+    bool _updatingPickers;
 
     // --- controls ---
     readonly Label _title = new() { AutoSize = false, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Font = UiFonts.Get(12.5f, FontStyle.Bold) };
@@ -66,10 +67,16 @@ sealed class SetupDialog : Form
     readonly RoundedScrollPanel _listScroll = new() { Dock = DockStyle.Fill, BackColor = Color.Transparent };
     readonly TableLayoutPanel _listInner;
     readonly TableLayoutPanel _capturePanel;
-    readonly Label _captureDetail = new() { AutoSize = false, Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 0) };
+    readonly Label _captureDetail = new() { Name = "CaptureDetail", AutoSize = false, Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 0) };
     readonly Label _captureHead = new() { AutoSize = false, Dock = DockStyle.Fill, Height = 26, Font = UiFonts.Get(10.5f, FontStyle.Bold) };
     readonly Label _validation = new() { AutoSize = true, Visible = false, Margin = new Padding(0, 4, 0, 4) };
-    readonly ComboBox _captureDevice = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top };
+    readonly ComboBox _captureDevice = new() { Name = "CaptureDevice", AccessibleName = "Device", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top };
+    readonly ComboBox _captureProfile = new() { Name = "CaptureProfile", AccessibleName = "Input profile", DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+    readonly TableLayoutPanel _profilePanel;
+    sealed record ProfileOption(MidiSourceMode Mode)
+    {
+        public override string ToString() => FaderSourceLogic.MidiProfileLabel(Mode);
+    }
     readonly FlowLayoutPanel _listButtons;
     readonly FlowLayoutPanel _captureButtons;
     readonly RoundedButton _addPhysical, _addVirtual, _done, _cancel, _capture, _captureCancel;
@@ -86,13 +93,15 @@ sealed class SetupDialog : Form
 
     public SetupDialog(MainForm.Theme t, Func<string, int[]> rawAxes, IReadOnlyList<DeviceOption> devices,
         IReadOnlyList<Item> existing, Action<string?>? deviceSelected = null,
-        Func<string, bool>? sourceConnected = null, bool pulseAddButtons = false)
+        Func<string, bool>? sourceConnected = null, bool pulseAddButtons = false,
+        Func<IReadOnlyList<DeviceOption>>? refreshDevices = null)
     {
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
         _t = t;
         _rawAxes = rawAxes;
-        _devices = devices;
+        _devices = CollapseDevices(devices);
+        _refreshDevices = refreshDevices;
         _deviceSelected = deviceSelected;
         _sourceConnected = sourceConnected;
 
@@ -126,8 +135,9 @@ sealed class SetupDialog : Form
         _listScroll.SetContent(_listInner);
 
         // Capture panel (shown while adding a physical fader).
-        _capturePanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Color.Transparent, Visible = false };
+        _capturePanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Color.Transparent, Visible = false };
         _capturePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _capturePanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _capturePanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _capturePanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _capturePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -141,12 +151,28 @@ sealed class SetupDialog : Form
         if (_captureDevice.Items.Count > 0) _captureDevice.SelectedIndex = 0;
         _captureDevice.SelectedIndexChanged += (_, _) =>
         {
-            ResetCapture();
-            if (_captureDevice.SelectedItem is DeviceOption selected) _deviceSelected?.Invoke(selected.Key);
+            if (_updatingPickers) return;
+            SetProfile(MidiSourceMode.Cc14);
+            CaptureSourceChanged();
         };
+        _captureProfile.BackColor = _t.CtlBg;
+        _captureProfile.ForeColor = _t.Text;
+        foreach (var mode in new[] { MidiSourceMode.Cc14, MidiSourceMode.Cc7, MidiSourceMode.Qmk })
+            _captureProfile.Items.Add(new ProfileOption(mode));
+        _captureProfile.SelectedIndex = 0;
+        _captureProfile.SelectedIndexChanged += (_, _) => { if (!_updatingPickers) CaptureSourceChanged(); };
+        _profilePanel = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Top, ColumnCount = 2, RowCount = 1,
+            BackColor = Color.Transparent, Margin = new Padding(0, 4, 0, 4) };
+        _profilePanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _profilePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _profilePanel.Controls.Add(new Label { Text = "Input profile", AutoSize = true, ForeColor = _t.Subtle,
+            Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 10, 0) }, 0, 0);
+        _profilePanel.Controls.Add(_captureProfile, 1, 0);
+        _profilePanel.Visible = FaderSourceLogic.IsMidi(DeviceKey);
         _capturePanel.Controls.Add(_captureHead, 0, 0);
         _capturePanel.Controls.Add(_captureDevice, 0, 1);
-        _capturePanel.Controls.Add(_captureDetail, 0, 2);
+        _capturePanel.Controls.Add(_profilePanel, 0, 2);
+        _capturePanel.Controls.Add(_captureDetail, 0, 3);
 
         // Both content panels share the content cell; only one is visible at a time.
         var content = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
@@ -157,6 +183,7 @@ sealed class SetupDialog : Form
         // Bottom buttons: list mode (Add physical / Add virtual / Done / Cancel).
         _listButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Dock = DockStyle.Top, WrapContents = true, BackColor = Color.Transparent, Margin = new Padding(0, 10, 0, 0) };
         _addPhysical = MakeButton("Add physical fader", accent: true);
+        _addPhysical.Name = "AddPhysical";
         // An offline remembered device can be connected after entering capture;
         // keep the action available whenever there is at least one known source.
         _addPhysical.Enabled = _devices.Count > 0;
@@ -172,6 +199,7 @@ sealed class SetupDialog : Form
         // Bottom buttons: capture mode (Capture / Cancel).
         _captureButtons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Dock = DockStyle.Top, BackColor = Color.Transparent, Margin = new Padding(0, 10, 0, 0), Visible = false };
         _capture = MakeButton("Capture", accent: true);
+        _capture.Name = "Capture";
         _capture.Enabled = false;
         _capture.Click += (_, _) => CaptureCandidate();
         _captureCancel = MakeButton("Cancel", accent: false);
@@ -198,6 +226,7 @@ sealed class SetupDialog : Form
         RebuildRows();
         UpdateTitle();
         _tick.Tick += (_, _) => Poll();
+        _tick.Start();
         // Force the DPI-scaled size — auto-scale doesn't reliably resize a
         // FixedDialog, so the content would clip at 125%+.
         Load += (_, _) =>
@@ -309,9 +338,10 @@ sealed class SetupDialog : Form
     string Subtitle(Item it)
     {
         if (it.Kind == ItemKind.Virtual) return "Virtual · dragged in the app";
-        var device = _devices.FirstOrDefault(d => d.Key.Equals(it.DeviceKey, StringComparison.OrdinalIgnoreCase));
+        var device = _devices.FirstOrDefault(d => d.Key.Equals(FaderSourceLogic.PickerDeviceKey(it.DeviceKey), StringComparison.OrdinalIgnoreCase));
         string state = device == null ? "unavailable" : device.Connected ? "connected" : "offline";
-        return $"{it.DeviceName} · axis {it.Axis + 1} · {state} · {it.Min}–{it.Max} mV";
+        string profile = FaderSourceLogic.TryMidiMode(it.DeviceKey, out var mode) ? $" · {FaderSourceLogic.MidiProfileLabel(mode)}" : "";
+        return $"{FaderSourceLogic.DeviceName(it.DeviceKey, it.DeviceName)}{profile} · {FaderSourceLogic.ControlName(it.DeviceKey, it.Axis)} · {state} · {it.Min}–{it.Max} {FaderSourceLogic.Units(it.DeviceKey)}";
     }
 
     void Swap(int a, int b)
@@ -345,12 +375,14 @@ sealed class SetupDialog : Form
         if (_editingIndex >= 0 && _editingIndex < _items.Count)
         {
             string key = _items[_editingIndex].DeviceKey;
+            _updatingPickers = true;
             for (int i = 0; i < _captureDevice.Items.Count; i++)
                 if (_captureDevice.Items[i] is DeviceOption option
-                    && option.Key.Equals(key, StringComparison.OrdinalIgnoreCase))
+                    && option.Key.Equals(FaderSourceLogic.PickerDeviceKey(key), StringComparison.OrdinalIgnoreCase))
                 { _captureDevice.SelectedIndex = i; break; }
+            SetProfile(FaderSourceLogic.TryMidiMode(key, out var mode) ? mode : MidiSourceMode.Cc14);
+            _updatingPickers = false;
         }
-        if (_captureDevice.SelectedItem is DeviceOption selected) _deviceSelected?.Invoke(selected.Key);
         // Exclude axes already bound to a physical fader in the current list.
         _usedAxes.Clear();
         for (int i = 0; i < _items.Count; i++)
@@ -359,7 +391,7 @@ sealed class SetupDialog : Form
             if (i != _editingIndex && it.Kind == ItemKind.Physical && it.Axis >= 0)
                 _usedAxes.Add(Binding(it.DeviceKey, it.Axis));
         }
-        ResetCapture();
+        CaptureSourceChanged();
 
         _capture.Enabled = false;
         _listScroll.Visible = false;
@@ -375,7 +407,6 @@ sealed class SetupDialog : Form
 
     void ExitCapture()
     {
-        _tick.Stop();
         _deviceSelected?.Invoke(null);
         _editingIndex = -1;
         _mode = Mode.List;
@@ -390,11 +421,35 @@ sealed class SetupDialog : Form
 
     void Poll()
     {
+        if (_refreshDevices != null && Environment.TickCount64 - _lastDeviceRefresh >= 1000)
+        {
+            _lastDeviceRefresh = Environment.TickCount64;
+            var next = CollapseDevices(_refreshDevices());
+            if (!_devices.Select(d => (d.Key, d.Name)).SequenceEqual(next.Select(d => (d.Key, d.Name))))
+            {
+                string selectedKey = DeviceKey;
+                string previousSource = CaptureKey;
+                var profile = SelectedProfile;
+                _updatingPickers = true;
+                _devices.Clear();
+                _devices.AddRange(next);
+                _captureDevice.Items.Clear();
+                foreach (var option in _devices) _captureDevice.Items.Add(option);
+                int selected = _devices.FindIndex(d => d.Key == selectedKey);
+                _captureDevice.SelectedIndex = selected >= 0 ? selected : _devices.Count > 0 ? 0 : -1;
+                SetProfile(selected >= 0 ? profile : MidiSourceMode.Cc14);
+                _updatingPickers = false;
+                _profilePanel.Visible = FaderSourceLogic.IsMidi(DeviceKey);
+                if (previousSource != CaptureKey) CaptureSourceChanged();
+                _addPhysical.Enabled = _devices.Count > 0;
+                if (_mode == Mode.List) RebuildRows();
+            }
+        }
         if (_mode != Mode.Capture) return;   // one timer; only capture mode reads axes
         if (_captureDevice.SelectedItem is not DeviceOption device) return;
         if (_sourceConnected != null)
         {
-            bool connected = _sourceConnected(device.Key);
+            bool connected = _sourceConnected(CaptureKey);
             if (device.Connected != connected)
             {
                 device.Connected = connected;
@@ -403,36 +458,33 @@ sealed class SetupDialog : Form
             }
         }
         if (!device.Connected) return;
-        var axes = _rawAxes(device.Key);
-        if (axes.Length < MaxAxes)
+        var axes = _rawAxes(CaptureKey);
+        if (axes.Length < _min.Length)
         {
             _captureDetail.Text = "Waiting for the selected device to begin reporting…";
             return;
         }
 
-        if (!_haveBaseline)
-        {
-            for (int a = 0; a < MaxAxes; a++) _min[a] = _max[a] = axes[a];
-            _haveBaseline = true;
-        }
-
         int best = -1, bestTravel = 0;
-        for (int a = 0; a < MaxAxes; a++)
+        for (int a = 0; a < _min.Length; a++)
         {
-            if (_usedAxes.Contains(Binding(device.Key, a))) continue;
+            // A MIDI controller is unknown until an actual CC arrives. Its first
+            // report establishes a baseline, never an invented movement from zero.
+            if (axes[a] == int.MinValue) continue;
+            if (_usedAxes.Contains(Binding(CaptureKey, a))) continue;
             if (axes[a] < _min[a]) _min[a] = axes[a];
             if (axes[a] > _max[a]) _max[a] = axes[a];
             int travel = _max[a] - _min[a];
             if (travel > bestTravel) { bestTravel = travel; best = a; }
         }
 
-        _candidate = bestTravel >= TravelThreshold ? best : -1;
+        _candidate = bestTravel >= FaderSourceLogic.TravelThreshold(CaptureKey) ? best : -1;
         _capture.Enabled = _candidate >= 0;
         UpdateCaptureText();
     }
 
     void UpdateCaptureText() => _captureDetail.Text = _candidate >= 0
-        ? $"Detected on axis {_candidate + 1} — range {_min[_candidate]}–{_max[_candidate]} mV.\n\n" +
+        ? $"Detected {FaderSourceLogic.ControlName(CaptureKey, _candidate)} — range {_min[_candidate]}–{_max[_candidate]} {FaderSourceLogic.Units(CaptureKey)}.\n\n" +
           (_editingIndex >= 0 ? "Sweep it fully, then use this source." : "Sweep it fully, then Capture.")
         : _captureDevice.Items.Count == 0
             ? "No compatible fader devices are currently detected."
@@ -446,7 +498,7 @@ sealed class SetupDialog : Form
         var captured = new Item
         {
             Kind = ItemKind.Physical,
-            DeviceKey = device.Key,
+            DeviceKey = CaptureKey,
             DeviceName = device.Name,
             Axis = _candidate,
             Min = _min[_candidate],
@@ -465,11 +517,38 @@ sealed class SetupDialog : Form
 
     void ResetCapture()
     {
-        _haveBaseline = false;
+        int count = FaderSourceLogic.Axes(CaptureKey);
+        _min = Enumerable.Repeat(int.MaxValue, count).ToArray();
+        _max = Enumerable.Repeat(int.MinValue, count).ToArray();
         _candidate = -1;
         _capture.Enabled = false;
         UpdateCaptureText();
     }
+
+    string DeviceKey => (_captureDevice.SelectedItem as DeviceOption)?.Key ?? "";
+    MidiSourceMode SelectedProfile => (_captureProfile.SelectedItem as ProfileOption)?.Mode ?? MidiSourceMode.Cc14;
+    string CaptureKey => FaderSourceLogic.WithMidiMode(DeviceKey, SelectedProfile);
+
+    void SetProfile(MidiSourceMode mode)
+    {
+        bool prior = _updatingPickers;
+        _updatingPickers = true;
+        for (int i = 0; i < _captureProfile.Items.Count; i++)
+            if (_captureProfile.Items[i] is ProfileOption option && option.Mode == mode)
+            { _captureProfile.SelectedIndex = i; break; }
+        _updatingPickers = prior;
+    }
+
+    void CaptureSourceChanged()
+    {
+        _profilePanel.Visible = FaderSourceLogic.IsMidi(DeviceKey);
+        ResetCapture();
+        if (_mode == Mode.Capture) _deviceSelected?.Invoke(CaptureKey.Length == 0 ? null : CaptureKey);
+    }
+
+    static List<DeviceOption> CollapseDevices(IEnumerable<DeviceOption> devices) =>
+        FaderSourceLogic.DeviceChoices(devices.Select(d => new FaderDeviceChoice(d.Key, d.Name, d.Connected)))
+            .Select(d => new DeviceOption { Key = d.Key, Name = d.Name, Connected = d.Connected }).ToList();
 
     static string Binding(string deviceKey, int axis) => FaderLayoutLogic.BindingKey(deviceKey, axis);
 
@@ -486,9 +565,9 @@ sealed class SetupDialog : Form
             return true;
         }
         var duplicate = duplicates[0];
-        string name = _devices.FirstOrDefault(d => d.Key.Equals(duplicate.DeviceKey,
+        string name = _devices.FirstOrDefault(d => d.Key.Equals(FaderSourceLogic.PickerDeviceKey(duplicate.DeviceKey),
             StringComparison.OrdinalIgnoreCase))?.Name ?? duplicate.DeviceKey;
-        _validation.Text = $"Duplicate source: {name}, axis {duplicate.Axis + 1}. Each physical source can be used once.";
+        _validation.Text = $"Duplicate source: {name}, {FaderSourceLogic.ControlName(duplicate.DeviceKey, duplicate.Axis)}. Each physical source can be used once.";
         _validation.Visible = true;
         _done.Enabled = false;
         return false;
@@ -589,5 +668,7 @@ sealed class SetupDialog : Form
             DwmSetWindowAttribute(Handle, 19, ref v, sizeof(int));
         if (_captureDevice.IsHandleCreated)
             SetWindowTheme(_captureDevice.Handle, _t.Dark ? "DarkMode_CFD" : null, null);
+        if (_captureProfile.IsHandleCreated)
+            SetWindowTheme(_captureProfile.Handle, _t.Dark ? "DarkMode_CFD" : null, null);
     }
 }

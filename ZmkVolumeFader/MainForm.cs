@@ -89,7 +89,7 @@ internal sealed class Hotkey
 /// max-volume cap: the throw scales into 0..cap (top = cap, middle = cap/2).
 /// The UI follows the OS light/dark theme with a green accent.
 /// </summary>
-public class MainForm : Form
+public partial class MainForm : Form
 {
     const int VID = 0x1D50, PID = 0x615E;
     const int MaxAxes = 8;   // hid-io vendor report carries up to eight 16-bit axes
@@ -832,10 +832,11 @@ public class MainForm : Form
     readonly Label _status = new() { Text = "Starting…", AutoSize = true, Anchor = AnchorStyles.Left };
     readonly Label _statusDot = new() { Text = "●", AutoSize = true, Font = UiFonts.Get(8f), Margin = new Padding(0, 3, 6, 0) };
 
-    // Slider cards are built dynamically into _sliderHost (one row each); it lives
+    // Slider cards are built dynamically into _sliderHost; it lives
     // inside _scroll, a custom scroll viewport that sizes the cards around its own
     // thumb (the native AutoScroll bar overlaid the cards' right edge).
-    TableLayoutPanel _sliderHost = null!, _footer = null!;
+    FaderCardGrid _sliderHost = null!;
+    TableLayoutPanel _footer = null!;
     RoundedScrollPanel _scroll = null!;
     // Empty-state card shown (in place of slider rows) when there are no faders.
     CardPanel? _emptyCard;
@@ -879,11 +880,12 @@ public class MainForm : Form
     bool _loadingSettings;
     bool _calibrating;   // true while the calibration dialog is open (don't drive devices)
     string _connText = "Starting…";   // last dongle-connection status text
-    string _connDetail = "Starting ZMK Volume Fader";
+    string _connDetail = "Starting DriftTrim";
     bool _connected;                  // dongle currently connected
 
-    readonly NotifyIcon _tray = new() { Text = "ZMK Volume Fader", Icon = LoadAppIcon() };
+    readonly NotifyIcon _tray = new() { Text = "DriftTrim", Icon = LoadAppIcon() };
     bool _exiting;
+    FormWindowState _lastWindowState = FormWindowState.Normal;
     bool _trayHintShown;   // one-time "still running in the tray" balloon
     string? _pendingTrayText, _lastTrayText;
     readonly object _statusPostLock = new();
@@ -898,7 +900,7 @@ public class MainForm : Form
         // display so nothing clips at 125%/150%/… Windows scaling.
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
-        Text = "ZMK Volume Fader";
+        Text = "DriftTrim";
 #if DEBUG
         // Dev builds carry the commit in the title so you can tell them apart.
         var _cid = CommitId();
@@ -910,8 +912,9 @@ public class MainForm : Form
         Icon = LoadAppIcon();
         Font = UiFonts.Get(9.75f);
         ClientSize = new Size(460, 364);
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
+        MinimumSize = SizeFromClientSize(new Size(460, 300));
         StartPosition = FormStartPosition.CenterScreen;
 
         // Start with no faders; settings load one global ordered layout. Until then
@@ -919,10 +922,9 @@ public class MainForm : Form
         _sliders = Array.Empty<Axis>();
         ClientSize = new Size(ClientSize.Width, WindowHeightFor(_sliders.Length));
 
-        // Slider cards stack in _sliderHost, which scrolls inside _scroll; the
+        // Slider cards flow into one or two columns inside _scroll; the
         // footer stays pinned below.
-        _sliderHost = new TableLayoutPanel { ColumnCount = 1, BackColor = Color.Transparent, Margin = new Padding(0), Padding = new Padding(0) };
-        _sliderHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _sliderHost = new FaderCardGrid { BackColor = Color.Transparent, Margin = new Padding(0), Padding = new Padding(0) };
         _scroll = new RoundedScrollPanel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(0), Padding = new Padding(0) };
         _scroll.SetContent(_sliderHost);
         PopulateSliderHost();
@@ -961,10 +963,17 @@ public class MainForm : Form
         _tray.DoubleClick += (_, _) => RestoreFromTray();
         _tray.Visible = true;
 
-        Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) MinimizeToTray(); };
-        // Moved to a monitor at a different scale — re-fit after the framework
-        // rescales the controls.
-        DpiChanged += (_, _) => BeginInvoke(FitWindowHeight);
+        Resize += (_, _) =>
+        {
+            if (WindowState == FormWindowState.Minimized) MinimizeToTray();
+            else _lastWindowState = WindowState;
+        };
+        // Re-measure controls after DPI scaling without resetting the chosen window size.
+        DpiChanged += (_, _) => BeginInvoke(() =>
+        {
+            MinimumSize = SizeFromClientSize(new Size(LogicalToDeviceUnits(460), LogicalToDeviceUnits(300)));
+            FitWindowHeight();
+        });
 
         _vramp.Tick += (_, _) => VrampTick();
         _faderPump.Tick += (_, _) => FaderPumpTick();
@@ -973,8 +982,8 @@ public class MainForm : Form
         Load += (_, _) =>
         {
             ApplyTheme(CurrentTheme()); LoadDevices(); LoadSettings(); PruneKnownApps();
-            BuildLayoutCards(_savedLayout); RefreshLayoutUi(); LoadCachedIcons(); PopulateCombos(); FitWindowHeight();
-            StartAudio(); StartHid(); RegisterDeviceNotifications(); StartHotkeys();
+            BuildLayoutCards(_savedLayout); RefreshLayoutUi(); LoadCachedIcons(); PopulateCombos(); FitWindowHeight(resizeWindow: true);
+            StartAudio(); StartHid(); StartMidi(); RegisterDeviceNotifications(); StartHotkeys();
             ShowSettingsRecoveryNotice();
         };
         FormClosing += OnFormClosing;
@@ -999,9 +1008,9 @@ public class MainForm : Form
         }
     }
 
-    // Size the window to the cards' actual content. Fonts are point-based so this
-    // is correct at any Windows display scaling; the host scrolls past the cap.
-    void FitWindowHeight()
+    // Measure cards at the current DPI. Fit the window only on first load;
+    // later layout edits and DPI changes preserve the user's chosen dimensions.
+    void FitWindowHeight(bool resizeWindow = false)
     {
         TuneComboItemHeight();
         int total = 0;
@@ -1026,24 +1035,22 @@ public class MainForm : Form
         // Keep cap >= min: Math.Clamp throws when max < min (short screen + high DPI).
         int cap = Math.Max(minH, Math.Min(LogicalToDeviceUnits(760),
             Screen.FromControl(this).WorkingArea.Height - LogicalToDeviceUnits(80)));
-        // Force width to the DPI-scaled design width too — belt-and-braces in case
-        // the framework auto-scale didn't already widen it.
-        ClientSize = new Size(LogicalToDeviceUnits(460), Math.Clamp(want, minH, cap));
-        _scroll.Reflow();   // resize the card column around the (custom) scrollbar
+        if (resizeWindow)
+            ClientSize = new Size(LogicalToDeviceUnits(460), Math.Clamp(want, minH, cap));
+        _scroll.Reflow();
     }
 
-    // (Re)build the slider host with one row per slider. Called on construction
+    // (Re)build the slider host in global layout order. Called on construction
     // and whenever the slider set changes.
     void PopulateSliderHost()
     {
         _sliderHost.SuspendLayout();
         _sliderHost.Controls.Clear();
-        _sliderHost.RowStyles.Clear();
         // The empty card is rebuilt each time; dispose the old one
         // (Controls.Clear doesn't) so rebuilds don't leak it.
         if (_emptyCard is { IsDisposed: false } oldEmpty) { ClearTips(oldEmpty); oldEmpty.Dispose(); }
         _emptyCard = null; _emptyTitle = _emptySub = null; _emptyAdd = null;
-        // One flat ordered column: hardware topology never dictates card order.
+        // One global order: hardware topology never dictates card order.
         var rows = new List<Control>();
         if (_sliders.Length == 0)
         {
@@ -1054,12 +1061,7 @@ public class MainForm : Form
             rows.AddRange(_sliders.Select(s => s.Card));
         }
 
-        _sliderHost.RowCount = rows.Count;
-        for (int i = 0; i < rows.Count; i++)
-        {
-            _sliderHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            _sliderHost.Controls.Add(rows[i], 0, i);
-        }
+        _sliderHost.Controls.AddRange(rows.ToArray());
         _sliderHost.ResumeLayout();
         _scroll?.Reflow();
     }
@@ -1377,6 +1379,7 @@ public class MainForm : Form
     // ---- "start with Windows" (HKCU Run key) ------------------------------
 
     const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    // Retain the installed startup entry identity across the DriftTrim rebrand.
     const string RunValueName = "ZMK Volume Fader";
 
     static bool GetStartWithWindows()
@@ -1659,15 +1662,15 @@ public class MainForm : Form
         if (!_trayHintShown)
         {
             _trayHintShown = true;
-            try { _tray.ShowBalloonTip(2500, "ZMK Volume Fader", "Still running in the tray — double-click to reopen.", ToolTipIcon.Info); }
+            try { _tray.ShowBalloonTip(2500, "DriftTrim", "Still running in the tray — double-click to reopen.", ToolTipIcon.Info); }
             catch { }
         }
     }
 
     void RestoreFromTray()
     {
+        WindowState = _lastWindowState;
         Show();
-        WindowState = FormWindowState.Normal;
         Activate();
     }
 
@@ -1686,7 +1689,7 @@ public class MainForm : Form
             if (_closeBehavior == CloseBehavior.Ask)
             {
                 var r = MessageBox.Show(this, "Minimize to tray instead of exiting?",
-                    "ZMK Volume Fader", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    "DriftTrim", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (r == DialogResult.Yes)
                 {
                     e.Cancel = true;
@@ -1698,6 +1701,7 @@ public class MainForm : Form
 
         FlushSettings();
         _settingsSaveDebounce.Dispose();
+        StopMidi();
         StopHid();       // stops discovery/readers and unblocks pending HID reads
         // Stop new device callbacks first, then the debounce they feed.
         if (_notify != null)
@@ -1951,7 +1955,7 @@ public class MainForm : Form
             {
                 if (_audioFaultShown) return;
                 _audioFaultShown = true;
-                _tray.ShowBalloonTip(4000, "ZMK Volume Fader",
+                _tray.ShowBalloonTip(4000, "DriftTrim",
                     "Windows audio control was interrupted and is reconnecting.", ToolTipIcon.Warning);
             });
         });
@@ -2015,7 +2019,7 @@ public class MainForm : Form
         {
             try
             {
-                BeginInvoke(() => _tray.ShowBalloonTip(3000, "ZMK Volume Fader",
+                BeginInvoke(() => _tray.ShowBalloonTip(3000, "DriftTrim",
                     "Global hotkeys couldn't be enabled.", ToolTipIcon.Warning));
             }
             catch { }
@@ -2672,7 +2676,7 @@ public class MainForm : Form
     void RemoveSlider(Axis a)
     {
         if (MessageBox.Show(this, $"Remove the virtual fader “{a.Name.Text}”?",
-                "ZMK Volume Fader", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                "DriftTrim", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
             != DialogResult.Yes) return;
         var configs = _sliders.Where(s => s != a).Select(ToConfig).ToList();
         BuildLayoutCards(configs);
@@ -2838,7 +2842,7 @@ public class MainForm : Form
     void ShowSettingsRecoveryNotice()
     {
         if (_settingsRecoveryNotice == null) return;
-        _tray.ShowBalloonTip(6500, "ZMK Volume Fader settings", _settingsRecoveryNotice, ToolTipIcon.Warning);
+        _tray.ShowBalloonTip(6500, "DriftTrim settings", _settingsRecoveryNotice, ToolTipIcon.Warning);
     }
 
     void SaveSettings()
@@ -2881,7 +2885,7 @@ public class MainForm : Form
             {
                 if (_settingsFaultShown) return;
                 _settingsFaultShown = true;
-                _tray.ShowBalloonTip(4000, "ZMK Volume Fader",
+                _tray.ShowBalloonTip(4000, "DriftTrim",
                     "Settings could not be saved. Details were written to error.log.", ToolTipIcon.Warning);
             });
         }
@@ -2916,7 +2920,7 @@ public class MainForm : Form
 
     void AddOrConnectSource(string key, string name)
     {
-        if (_legacyBindingPending)
+        if (_legacyBindingPending && !FaderSourceLogic.IsMidi(key))
         {
             var migrated = _sliders.Select(ToConfig).ToList();
             foreach (var config in migrated)
@@ -2991,7 +2995,8 @@ public class MainForm : Form
                     _sourceStates[sourceKey] = source = new PhysicalSourceState
                     {
                         Name = c.SourceDeviceName ?? sourceKey,
-                        Connected = _readerSnapshot.Any(r => r.Key.Equals(sourceKey, StringComparison.OrdinalIgnoreCase)),
+                        Connected = _readerSnapshot.Any(r => r.Key.Equals(sourceKey, StringComparison.OrdinalIgnoreCase))
+                            || (_midi?.IsConnected(sourceKey) ?? false),
                     };
                 else if (!string.IsNullOrWhiteSpace(c.SourceDeviceName))
                     source.Name = c.SourceDeviceName!;
@@ -2999,6 +3004,7 @@ public class MainForm : Form
             var a = BuildSlider(c.AxisIndex, string.IsNullOrEmpty(c.Label) ? $"Fader {i + 1}" : c.Label, c.IsVirtual);
             a.ConfigId = string.IsNullOrEmpty(c.Id) ? Guid.NewGuid().ToString("N") : c.Id;
             a.SourceKey = sourceKey;
+            if (FaderSourceLogic.IsMidi(sourceKey)) a.LastRaw = int.MinValue;
             a.SourceDeviceName = c.IsVirtual ? "Virtual" : (c.SourceDeviceName ?? source!.Name);
             UpdateSourceLabel(a);
             a.Prefs = ClonePrefs(c.Outputs);
@@ -3012,7 +3018,7 @@ public class MainForm : Form
             ApplyCalibration(a, c.Cal);
             built.Add(a);
             _tip.SetToolTip(a.Name, c.IsVirtual ? "Virtual fader · double-click to rename"
-                : $"{a.SourceDeviceName} · axis {a.AxisIndex + 1} · double-click to rename");
+                : $"{a.SourceDeviceName} · {FaderSourceLogic.ControlName(a.SourceKey, a.AxisIndex)} · double-click to rename");
         }
         foreach (string stale in _sourceStates.Keys.Where(key => !referencedSources.Contains(key)).ToArray())
             _sourceStates.Remove(stale);
@@ -3021,6 +3027,7 @@ public class MainForm : Form
         _configuredDeviceSnap = _sliders.Where(s => !s.IsVirtual).Select(s => s.SourceKey)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var s in old) { ClearTips(s.Card); s.Card.Dispose(); }
+        RefreshMidiSubscriptions();
     }
 
     // Re-lay out the flat global fader list and refresh dependent UI/state.
@@ -3069,6 +3076,8 @@ public class MainForm : Form
                 Connected = true,
             })
             .ToList();
+        if (_midi != null) devices.AddRange(_midi.Sources().Select(s => new SetupDialog.DeviceOption
+            { Key = s.Key, Name = s.Name, Connected = true }));
         var detectedKeys = devices.Select(d => d.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var source in existing.Where(item => item.Kind == SetupDialog.ItemKind.Physical)
                      .GroupBy(item => item.DeviceKey, StringComparer.OrdinalIgnoreCase)
@@ -3093,15 +3102,27 @@ public class MainForm : Form
             foreach (var reader in _readerSnapshot.Where(r => !_configuredDeviceSnap.Contains(r.Key)
                          && (key == null || !r.Key.Equals(key, StringComparison.OrdinalIgnoreCase))))
                 StopReader(reader.Key);
+            RefreshMidiSubscriptions();
             _discoveryWake.Set();
         }
 
         bool prev = _calibrating;
         _calibrating = true;   // don't drive outputs mid-sweep
+        IReadOnlyList<SetupDialog.DeviceOption> CurrentCaptureDevices()
+        {
+            var midiDevices = _midi?.Sources().Select(s => new SetupDialog.DeviceOption
+                { Key = s.Key, Name = s.Name, Connected = true }).ToList() ?? new();
+            var present = midiDevices.Select(d => d.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            return devices.Where(d => !FaderSourceLogic.IsMidi(d.Key)).Concat(midiDevices)
+                .Concat(devices.Where(d => FaderSourceLogic.IsMidi(d.Key) && !present.Contains(d.Key))
+                    .Select(d => new SetupDialog.DeviceOption { Key = d.Key, Name = d.Name, Connected = false }))
+                .OrderByDescending(d => d.Connected).ThenBy(d => d.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
         try
         {
             using var dlg = new SetupDialog(_theme, RawFor, devices, existing, SelectCaptureDevice,
-                key => _readerSnapshot.Any(reader => reader.Key.Equals(key, StringComparison.OrdinalIgnoreCase)), pulse);
+                key => _readerSnapshot.Any(reader => reader.Key.Equals(key, StringComparison.OrdinalIgnoreCase))
+                    || (_midi?.IsConnected(key) ?? false), pulse, CurrentCaptureDevices);
             if (dlg.ShowDialog(this) == DialogResult.OK)
             {
                 var configs = dlg.Result.Select((item, i) =>
@@ -3141,6 +3162,7 @@ public class MainForm : Form
         {
             _calibrating = prev;
             _captureDeviceSnap = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            RefreshMidiSubscriptions();
             foreach (var reader in _readerSnapshot.Where(r => !_configuredDeviceSnap.Contains(r.Key)))
                 StopReader(reader.Key);
             _discoveryWake.Set();
@@ -3177,7 +3199,8 @@ public class MainForm : Form
         var cats = _categories.Select(c => new Category { Name = c.Name, AppKeys = new(c.AppKeys) }).ToList();
         var virtuals = _sliders.Select(s => s.IsVirtual).ToArray();
         using var dlg = new OptionsDialog(_theme, _themeMode, GetStartWithWindows(), _closeBehavior, _softTakeover,
-            cals, raws, outs, labels, AllKnownOutputs(), _present.Keys.ToArray(), cats, _knownApps, _appIcons, virtuals, _liveApps);
+            cals, raws, outs, labels, AllKnownOutputs(), _present.Keys.ToArray(), cats, _knownApps, _appIcons, virtuals, _liveApps,
+            _sliders.Select(s => s.SourceKey).ToArray());
         _calibrating = true;                 // stop driving devices while sweeping
         var result = dlg.ShowDialog(this);
         _calibrating = false;
@@ -3230,7 +3253,7 @@ public class MainForm : Form
         process.Refresh();
         var readers = _readerSnapshot;
         var sb = new StringBuilder();
-        sb.AppendLine("ZMK Volume Fader diagnostics");
+        sb.AppendLine("DriftTrim diagnostics");
         sb.AppendLine($"Generated: {DateTimeOffset.Now:O}");
         sb.AppendLine($"Build: {VersionText()}");
         sb.AppendLine($"Runtime: {RuntimeInformation.FrameworkDescription}");
@@ -3249,6 +3272,13 @@ public class MainForm : Form
         sb.AppendLine($"  Reports received: {Interlocked.Read(ref _hidReportCount)}");
         foreach (var reader in readers) sb.AppendLine($"  Device: {reader.Name} ({reader.Key})");
         sb.AppendLine();
+        sb.AppendLine("MIDI");
+        sb.AppendLine($"  Messages received: {_midi?.Messages ?? 0}");
+        sb.AppendLine($"  Open sources: {_midiConnectedNames.Length}");
+        sb.AppendLine($"  Last error: {_midi?.LastError ?? "none"}");
+        sb.AppendLine($"  Stale QMK controls: {_midiExpired.Count}");
+        foreach (var name in _midiConnectedNames) sb.AppendLine($"  Source: {name}");
+        sb.AppendLine();
         sb.AppendLine("Core Audio");
         sb.AppendLine($"  Endpoints: {_audio?.EndpointCount ?? 0}");
         sb.AppendLine($"  Sessions: {_audio?.SessionCount ?? 0}");
@@ -3264,7 +3294,7 @@ public class MainForm : Form
         sb.AppendLine($"  Soft takeover armed: {_sliders.Count(a => a.PickupArmed)}");
         sb.AppendLine($"  Muted: {_sliders.Count(a => a.VMuted)}");
         foreach (var a in _sliders)
-            sb.AppendLine($"  {a.Name.Text}: {(a.IsVirtual ? "virtual" : $"{a.SourceDeviceName} axis {a.AxisIndex + 1}")}, {a.Target}, {a.LastApplied}%");
+            sb.AppendLine($"  {a.Name.Text}: {(a.IsVirtual ? "virtual" : $"{a.SourceDeviceName} {FaderSourceLogic.ControlName(a.SourceKey, a.AxisIndex)}")}, {a.Target}, {a.LastApplied}%");
         sb.AppendLine();
         sb.AppendLine($"Settings: {SettingsPath}");
         sb.AppendLine($"Error log: {Program.ErrorLogPath} ({(File.Exists(Program.ErrorLogPath) ? "present" : "not present")})");
@@ -3276,9 +3306,9 @@ public class MainForm : Form
         FlushSettings(force: true);
         using var dialog = new SaveFileDialog
         {
-            Title = "Export ZMK Volume Fader settings",
-            Filter = "ZMK Volume Fader settings (*.json)|*.json|All files (*.*)|*.*",
-            FileName = $"ZmkVolumeFader-settings-{DateTime.Now:yyyyMMdd}.json",
+            Title = "Export DriftTrim settings",
+            Filter = "DriftTrim settings (*.json)|*.json|All files (*.*)|*.*",
+            FileName = $"DriftTrim-settings-{DateTime.Now:yyyyMMdd}.json",
             AddExtension = true,
             DefaultExt = "json",
         };
@@ -3365,8 +3395,8 @@ public class MainForm : Form
     {
         using var dialog = new OpenFileDialog
         {
-            Title = "Import ZMK Volume Fader settings",
-            Filter = "ZMK Volume Fader settings (*.json)|*.json|All files (*.*)|*.*",
+            Title = "Import DriftTrim settings",
+            Filter = "DriftTrim settings (*.json)|*.json|All files (*.*)|*.*",
             CheckFileExists = true,
         };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
@@ -3693,14 +3723,14 @@ public class MainForm : Form
     // conveys state; the full connection detail remains available on hover.
     void UpdateAggregateStatus()
     {
-        var names = _readerSnapshot.Select(r => r.Name).ToList();
+        var names = _readerSnapshot.Select(r => r.Name).Concat(_midiConnectedNames).ToList();
         if (names.Count == 0)
         {
             SetStatus("Disconnected", false, "No fader device connected — plug one in.");
             return;
         }
         string detail = "Connected:\n" + string.Join("\n", names.Select(name => $"• {name}"));
-        SetStatus(names.Count == 1 ? names[0] : $"{names.Count} devices", true, detail);
+        SetStatus(names.Count == 1 ? names[0] : $"{names.Count} sources", true, detail);
     }
 
     static int ReadAxis(byte[] b, int i) => (short)(b[i] | (b[i + 1] << 8));
@@ -3711,6 +3741,7 @@ public class MainForm : Form
     void FaderPumpTick()
     {
         if (!IsHandleCreated) return;
+        PumpMidi();
         foreach (var r in _readerSnapshot)
         {
             int count;
@@ -3760,7 +3791,7 @@ public class MainForm : Form
     bool PumpHasWork()
     {
         if (_sliders.Any(a => a.VolPending >= 0)) return true;
-        return _readerSnapshot.Any(r => r.HasPending);
+        return _readerSnapshot.Any(r => r.HasPending) || (_midi?.HasPending ?? false);
     }
 
     // Synthetic fader motion (--diag-synth): sweep every physical slider through
@@ -3796,19 +3827,19 @@ public class MainForm : Form
         // toward 0% at heartbeat rate and could stall inside the hysteresis
         // band. Movement past the noise floor snaps; smoothing only ever
         // filters idle flicker.
-        a.Sm = a.Sm < 0 || Math.Abs(raw - a.Sm) > SnapBand
+        a.Sm = FaderSourceLogic.IsMidi(a.SourceKey) || a.Sm < 0 || Math.Abs(raw - a.Sm) > SnapBand
             ? raw
             : a.Sm * 0.85 + raw * 0.15;
         Render(a, takeOwnership: true);
     }
 
     bool IsFaderConnected(Axis a) =>
-        a.IsVirtual || _sourceStates.TryGetValue(a.SourceKey, out var source) && source.Connected;
+        a.IsVirtual || _sourceStates.TryGetValue(a.SourceKey, out var source) && source.Connected && MidiInputLive(a);
 
     void UpdateSourceLabel(Axis a)
     {
         if (a.IsVirtual) { a.Source.Text = "Virtual"; return; }
-        string source = $"{a.SourceDeviceName} · A{a.AxisIndex + 1}";
+        string source = $"{a.SourceDeviceName} · {FaderSourceLogic.ControlName(a.SourceKey, a.AxisIndex)}";
         if (!IsFaderConnected(a)) source += " · Offline";
         a.Source.Text = source;
     }
@@ -3907,7 +3938,8 @@ public class MainForm : Form
             if (a.Cal.MuteRaw > 0)
             {
                 if (a.Cal.IsInMuteZone(a.LastRaw)) a.InMuteZone = true;
-                else if (a.Cal.IsOutsideMuteZone(a.LastRaw, MuteExitBand)) a.InMuteZone = false;
+                else if (a.Cal.IsOutsideMuteZone(a.LastRaw, FaderSourceLogic.IsMidi(a.SourceKey)
+                    ? Math.Max(1, Math.Abs(a.Cal.Max - a.Cal.Min) / 200) : MuteExitBand)) a.InMuteZone = false;
             }
             else a.InMuteZone = false;
             if (a.InMuteZone) faderPct = 0;
@@ -4078,7 +4110,7 @@ public class MainForm : Form
         string body = _connected
             ? string.Join(" · ", _sliders.Select(s => $"{s.Bar.Value}%"))
             : "Disconnected";
-        string t = $"ZMK Volume Fader\n{body}";
+        string t = $"DriftTrim\n{body}";
         t = t.Length <= 63 ? t : t[..63];
         if (t == _pendingTrayText || t == _lastTrayText) return;
         _pendingTrayText = t;

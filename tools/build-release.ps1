@@ -22,8 +22,8 @@ $publishDir = Join-Path $root 'artifacts\publish'
 $releaseDir = Join-Path $root 'artifacts\release'
 New-Item -ItemType Directory -Force -Path $publishDir, $releaseDir | Out-Null
 
-$portableName = "ZmkVolumeFader-$Version-win-x64.exe"
-$installerName = "ZmkVolumeFader-$Version-win-x64.msi"
+$portableName = "DriftTrim-$Version-win-x64.exe"
+$installerName = "DriftTrim-$Version-win-x64.msi"
 $portablePath = Join-Path $releaseDir $portableName
 $installerPath = Join-Path $releaseDir $installerName
 $checksumPath = Join-Path $releaseDir 'SHA256SUMS.txt'
@@ -57,7 +57,7 @@ try {
 
     Copy-Item -LiteralPath (Join-Path $publishDir 'ZmkVolumeFader.exe') -Destination $portablePath
     $builtInstaller = Get-ChildItem -LiteralPath (Join-Path $root 'Installer\bin') `
-        -Filter "ZmkVolumeFader-$Version-win-x64.msi" -File -Recurse |
+        -Filter "DriftTrim-$Version-win-x64.msi" -File -Recurse |
         Select-Object -First 1
     if ($null -eq $builtInstaller) {
         throw 'Installer build completed but the MSI could not be found.'

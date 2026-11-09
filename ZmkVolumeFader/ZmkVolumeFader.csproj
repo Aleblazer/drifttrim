@@ -2,17 +2,18 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>ZmkVolumeFader</RootNamespace>
     <AssemblyName>ZmkVolumeFader</AssemblyName>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.5.0</Version>
-    <FileVersion>1.5.0.0</FileVersion>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <Product>ZMK Volume Fader</Product>
+    <Version>1.6.2</Version>
+    <FileVersion>1.6.2.0</FileVersion>
+    <AssemblyVersion>1.6.2.0</AssemblyVersion>
+    <Product>DriftTrim</Product>
+    <AssemblyTitle>DriftTrim</AssemblyTitle>
     <Company>Aleblazer</Company>
     <!-- Per-monitor DPI so WinForms auto-scales the (hand-coded) layout at 125%+
          Windows display scaling and re-scales when moved between monitors. -->

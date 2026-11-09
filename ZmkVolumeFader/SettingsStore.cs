@@ -26,7 +26,7 @@ internal sealed class SliderConfig
     public int PreMute { get; set; } = 50;
 }
 
-// Schema 3 and earlier only. Active schema-4 settings use Layout exclusively.
+// Schema 3 and earlier only. Active schema-4+ settings use Layout exclusively.
 internal sealed class LegacyDeviceProfile
 {
     public string Name { get; set; } = "";
@@ -48,7 +48,7 @@ internal sealed class Settings
     public Dictionary<string, long> AppSeen { get; set; } = new();
     // Legacy-only payload. These members deserialize old files, are consumed by
     // SettingsStore.Normalize, then cleared so they never enter active runtime
-    // state or get written back into a schema-4 document.
+    // state or get written back into a current-schema document.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, LegacyDeviceProfile>? Devices { get; set; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -80,12 +80,12 @@ internal sealed class Settings
 /// <summary>Size limits and normalization for settings loaded from disk or import.</summary>
 internal static class SettingsStore
 {
-    internal const int CurrentSchema = 4;
+    internal const int CurrentSchema = 5;
     internal const int MaxKnownApps = 4096;
     internal const string LegacyFirstDeviceKey = "#legacy-first-device";
     const int MaxSettingsBytes = 8 * 1024 * 1024;
     const int MaxProfiles = 64, MaxSlidersPerProfile = 64, MaxLayoutFaders = 128, MaxCategories = 128;
-    const int MaxCategoryApps = 4096, MaxOutputPrefs = 64, MaxAxes = 8;
+    const int MaxCategoryApps = 4096, MaxOutputPrefs = 64;
 
     public static string Read(string path)
     {
@@ -146,6 +146,7 @@ internal static class SettingsStore
         slider.Id = CleanText(slider.Id, 64);
         slider.SourceDeviceKey = CleanText(slider.SourceDeviceKey, 512) is { Length: > 0 } source ? source : null;
         slider.SourceDeviceName = CleanText(slider.SourceDeviceName, 160) is { Length: > 0 } sourceName ? sourceName : null;
+        if (slider.SourceDeviceKey != null) slider.SourceDeviceKey = FaderSourceLogic.CanonicalKey(slider.SourceDeviceKey);
         slider.Label = CleanText(slider.Label, 80);
         slider.Cal = NormalizeCalibration(slider.Cal);
         slider.Outputs = NormalizeOutputs(slider.Outputs);
@@ -168,7 +169,7 @@ internal static class SettingsStore
             slider.SourceDeviceName = null;
             slider.AxisIndex = -1;
         }
-        else slider.AxisIndex = Math.Clamp(slider.AxisIndex, 0, MaxAxes - 1);
+        else slider.AxisIndex = Math.Clamp(slider.AxisIndex, 0, FaderSourceLogic.Axes(slider.SourceDeviceKey) - 1);
         if (slider.Label.Length == 0)
             slider.Label = slider.IsVirtual ? "Virtual fader" : $"Fader {slider.AxisIndex + 1}";
         return slider;
@@ -238,7 +239,7 @@ internal static class SettingsStore
         // Schema 3 and earlier stored one ordered list per device. Flatten those
         // profiles once into the global layout; schema 4 can intentionally persist
         // an empty layout without the legacy dictionaries resurrecting it.
-        bool migrateLegacyLayout = settings.SchemaVersion < CurrentSchema && settings.Layout.Count == 0;
+        bool migrateLegacyLayout = settings.SchemaVersion < 4 && settings.Layout.Count == 0;
         if (migrateLegacyLayout)
         {
             foreach (var pair in devices

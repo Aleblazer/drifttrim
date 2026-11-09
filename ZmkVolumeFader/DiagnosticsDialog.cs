@@ -82,7 +82,7 @@ sealed class DiagnosticsDialog : Form
         {
             Title = "Export diagnostic report",
             Filter = "Text report (*.txt)|*.txt|All files (*.*)|*.*",
-            FileName = $"ZmkVolumeFader-diagnostics-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
+            FileName = $"DriftTrim-diagnostics-{DateTime.Now:yyyyMMdd-HHmmss}.txt",
             AddExtension = true,
             DefaultExt = "txt",
         };

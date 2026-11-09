@@ -5,13 +5,13 @@ internal static class CalibrationCaptureLogic
     internal sealed record Analysis(string Message, bool Good, int? SuggestedMuteRaw,
         int Span, int CoveragePercent, int PriorTravelPercent);
 
-    public static Analysis Analyze(IReadOnlyList<int> samples, int priorSpan)
+    public static Analysis Analyze(IReadOnlyList<int> samples, int priorSpan, int rawFullScale = 3250)
     {
         if (samples.Count < 8)
             return new Analysis("Too few samples — sweep the full travel more slowly", false, null, 0, 0, 0);
 
         int min = samples.Min(), max = samples.Max(), span = max - min;
-        if (span < 100)
+        if (span < Math.Max(4, (int)Math.Round(100d * rawFullScale / 3250)))
             return new Analysis("Travel is too narrow — make sure both endpoints are reached", false, null, span, 0, 0);
 
         const int binCount = 12;
@@ -30,9 +30,10 @@ internal static class CalibrationCaptureLogic
         int tailSpread = tail.Max() - tail.Min();
         double tailAverage = tail.Average();
         bool endedLow = tailAverage <= min + span * 0.10;
-        bool stableEndpoint = tailSpread <= Math.Max(4, span * 0.01);
-        if (endedLow && stableEndpoint && min < 300)
-            suggestedMute = Math.Min(300, min + Math.Max(10, tailSpread * 3));
+        bool stableEndpoint = tailSpread <= Math.Max(Math.Max(1, (int)Math.Round(4d * rawFullScale / 3250)), span * 0.01);
+        int muteCap = Math.Max(1, (int)Math.Round(300d * rawFullScale / 3250));
+        if (endedLow && stableEndpoint && min < muteCap)
+            suggestedMute = Math.Min(muteCap, min + Math.Max(Math.Max(1, (int)Math.Round(10d * rawFullScale / 3250)), tailSpread * 3));
 
         bool good = travel >= 85 && coverage >= 67;
         string message = travel < 85

@@ -1,11 +1,11 @@
-# zmk-volume-fader
+# DriftTrim
 
-[![Build](https://github.com/Aleblazer/zmk-volume-fader/actions/workflows/build.yml/badge.svg)](https://github.com/Aleblazer/zmk-volume-fader/actions/workflows/build.yml)
+[![Build](https://github.com/Aleblazer/drifttrim/actions/workflows/build.yml/badge.svg)](https://github.com/Aleblazer/drifttrim/actions/workflows/build.yml)
 
-**ZMK Volume Fader** rides the volume of your apps and audio devices in real time —
-with **physical slide faders on a ZMK keyboard**, **on-screen faders you drag with
-the mouse**, **global hotkeys**, or any mix of the three. A ZMK keyboard is
-**optional**: everything works with no hardware at all.
+**DriftTrim** (formerly ZMK Volume Fader) rides the volume of your apps and audio devices in real time —
+with **ZMK HID faders**, **QMK/VIK and other MIDI CC controllers**, **on-screen
+faders**, **global hotkeys**, or any mix. Hardware is optional: everything also
+works with virtual faders and hotkeys alone.
 
 Point each fader at a **Windows output device**, a **single app**, or a **group of
 apps**, and ride levels — say game vs. chat, or Discord vs. everything else —
@@ -14,15 +14,35 @@ the background.
 
 <!-- TODO: add a screenshot of the window here, e.g. docs/screenshot.png -->
 
+DriftTrim is the new name for this app. The existing repository has moved to
+[`Aleblazer/drifttrim`](https://github.com/Aleblazer/drifttrim), retaining its history
+and releases. Version 1.6 adds MIDI input alongside the existing HID path.
+This 1.6 work is not yet published as a release.
+See the [QMK and MIDI setup guide](docs/qmk-midi.md).
+
+### Upgrading from ZMK Volume Fader
+
+The DriftTrim 1.6 release keeps existing settings, the Windows startup entry,
+and installer upgrade identity. The internal executable, source project names,
+installation directory and `%APPDATA%\ZmkVolumeFader` location retain their
+legacy names for compatibility. The app, Start Menu shortcut, Installed Apps
+entry and new release downloads display DriftTrim. Earlier releases still use
+the ZmkVolumeFader download filenames.
+
+See [the naming check and rebrand notes](docs/drifttrim-rebrand.md) for the current
+availability findings and compatibility details.
+
 ## Features
 
-- **Any number of configured faders** (up to 8 physical axes per device), each independently controlling one of:
+- **Up to 128 configured faders** (including 32 faders from the QMK/VIK firmware; HID reports retain their 8-axis limit), each independently controlling one of:
   - an **output device** (with ranked fallback across devices),
   - one **app's** volume (followed across every device it's playing on),
   - a **category** of apps that move together, or
   - **"Everything Else"** — every running app not assigned to a category (and not
     already targeted directly by another fader, so they never fight).
-- **Physical faders** — slide pots on a ZMK keyboard, read over USB HID *(optional hardware)*.
+- **Physical faders** — ZMK over vendor HID, QMK/VIK over paired 14-bit MIDI CC,
+  and generic absolute 7-bit or paired 14-bit CC controllers. MIDI Learn discovers
+  the channel and controller while you sweep. Multiple devices can run together.
 - **Virtual faders** — on-screen faders you drag with the mouse. **No hardware required.**
 - **Global hotkeys** for virtual faders — bind Volume Up / Down / Mute to any key
   (**F13–F24** are ideal) or a modifier combo. Keys pass through, so they still work
@@ -38,12 +58,12 @@ the background.
 ## Install
 
 Download the latest release from
-[Releases](https://github.com/Aleblazer/zmk-volume-fader/releases) (Windows 10/11 x64):
+[Releases](https://github.com/Aleblazer/drifttrim/releases) (Windows 10 version 2004/build 19041 or later, or Windows 11; x64):
 
-- **`ZmkVolumeFader-<version>-win-x64.msi`** — recommended installer; adds the app to
+- **`DriftTrim-<version>-win-x64.msi`** — recommended installer; adds the app to
   the Start Menu and Windows Installed Apps, supports in-place upgrades, and uninstalls
   cleanly.
-- **`ZmkVolumeFader-<version>-win-x64.exe`** — portable, self-contained single file.
+- **`DriftTrim-<version>-win-x64.exe`** — portable, self-contained single file.
 
 Neither build needs a separate .NET installation. Existing settings in
 `%APPDATA%\ZmkVolumeFader` are preserved when installing, upgrading, or uninstalling.
@@ -53,9 +73,10 @@ Neither build needs a separate .NET installation. Existing settings in
 
 ## Requirements
 
-- **Windows 10/11** (uses the Core Audio API and WinForms).
-- *(optional)* a **ZMK keyboard** whose dongle exposes slide faders over USB HID —
-  needed only for **physical** faders. Without one, use virtual faders + hotkeys.
+- **Windows 10 version 2004/build 19041 or later, or Windows 11** (x64).
+- *(optional)* a ZMK vendor-HID fader device or a Windows-visible MIDI input
+  sending absolute CC values. The [MIDI guide](docs/qmk-midi.md) covers profiles,
+  firmware mappings, multiple modules and calibration.
 - *(to build from source)* the **.NET 8 SDK**:
   ```bat
   winget install Microsoft.DotNet.SDK.8
@@ -86,8 +107,9 @@ Build the tested portable executable and MSI release assets together:
 
 Open **Fader Layout** on the main window—or **Options → Fader layout…**—to add faders:
 
-- **Add physical fader** — choose a detected device and sweep the fader fully
-  bottom-to-top; the app detects its axis and captures its range.
+- **Add physical fader** — choose a detected HID or MIDI device (each appears
+  once). MIDI defaults to **14-bit CC**, with a separate **Input profile** selector.
+  Sweep the fader fully bottom-to-top; the app detects its control and captures its range.
 - **Add virtual fader** — adds an on-screen fader you drag with the mouse.
 - Reorder with ▲/▼, remove with ✕, rename in place, or use **Source…** to move an
   existing physical fader to another device/axis without losing its target settings.
@@ -96,6 +118,10 @@ Open **Fader Layout** on the main window—or **Options → Fader layout…**—
 
 With no faders configured, the main window shows an **"Add fader"** card that jumps
 straight into setup.
+
+Resize or maximize the main window to fit your workspace. Faders appear in two
+columns when there is room for both, reading left-to-right in layout order;
+narrower windows use one column. Shorter windows scroll while the footer stays visible.
 
 Each fader card has:
 
@@ -173,6 +199,9 @@ py fader_read.py
 ## Leak diagnostics
 
 The executable accepts opt-in isolation switches for troubleshooting:
+
+- `--diag-midi-list` lists Windows MIDI input/profile choices as JSON and exits
+  without opening MIDI ports, loading settings or starting audio.
 
 - `--diag-no-volume` keeps device/session tracking active but sends no volume setters.
 - `--diag-sink` reads and discards HID reports before the fader pipeline.

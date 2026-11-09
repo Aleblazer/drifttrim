@@ -374,4 +374,16 @@ SettingsStore.Normalize(redundantStraightPreview);
 Expect(redundantStraightPreview.Layout[0].Cal.Taper == TaperKind.Straight,
     "redundant reversed-straight preview settings migrate to uncompensated Straight");
 
+MidiLogicTests.Run();
+if (args.Contains("--layout-ui-smoke")) FaderCardGridSmoke.Run();
+int setupSmoke = Array.IndexOf(args, "--setup-ui-smoke");
+if (setupSmoke >= 0) SetupDialogSmoke.Run(args.Length > setupSmoke + 1 ? args[setupSmoke + 1] : null);
+if (args.Contains("--midi-smoke"))
+{
+    using var midi = new MidiInputService();
+    if (!midi.InitialEnumeration.Wait(TimeSpan.FromSeconds(10)))
+        throw new TimeoutException("Windows MIDI input enumeration did not complete.");
+    if (midi.LastError != null) throw new InvalidOperationException(midi.LastError);
+    Console.WriteLine($"Windows MIDI discovery initialized; {midi.Sources().Length / 3} input endpoints found. No inputs opened.");
+}
 Console.WriteLine("All logic tests passed.");

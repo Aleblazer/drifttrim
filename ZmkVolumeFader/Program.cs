@@ -62,6 +62,29 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // Non-invasive packaged-runtime check: enumerate MIDI without opening
+        // input ports, loading settings, starting audio or creating the main UI.
+        if (args.Any(a => a.Equals("--diag-midi-list", StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                using var midi = new MidiInputService();
+                if (!midi.InitialEnumeration.Wait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Windows MIDI input enumeration did not complete.");
+                if (midi.LastError != null) throw new IOException(midi.LastError);
+                Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Version = typeof(Program).Assembly.GetName().Version?.ToString(),
+                    Sources = midi.Sources(),
+                }));
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+            }
+            return;
+        }
         foreach (var a in args)
         {
             if (a.Equals("--diag-sink", StringComparison.OrdinalIgnoreCase)) DiagSink = true;
@@ -101,7 +124,7 @@ static class Program
         try
         {
             MessageBox.Show($"Something went wrong:\n\n{ex.Message}\n\nDetails were saved to:\n{ErrorLogPath}",
-                "ZMK Volume Fader", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                "DriftTrim", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch { }
     }

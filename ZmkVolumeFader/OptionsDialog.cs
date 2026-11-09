@@ -56,6 +56,8 @@ sealed class OptionsDialog : Form
     readonly bool[] _previewCurveValid;
     readonly List<int>[] _captureSamples;
     readonly int[] _priorSpans;
+    readonly string[] _sourceKeys;
+    readonly Calibration[] _recordOriginal;
 
     readonly CheckBox _startup = new() { Text = "Start with Windows", AutoSize = true, FlatStyle = FlatStyle.Standard, Margin = new Padding(0, 0, 0, 0) };
     readonly CheckBox _softTakeover = new() { Text = "Soft takeover for physical faders", AutoSize = true, FlatStyle = FlatStyle.Standard, Margin = new Padding(0, 6, 0, 0) };
@@ -86,7 +88,7 @@ sealed class OptionsDialog : Form
         IReadOnlyList<OutputPref> known, IEnumerable<string> presentIds,
         List<Category> categories, IReadOnlyDictionary<string, string> knownApps,
         IReadOnlyDictionary<string, Image?>? appIcons = null, bool[]? virtuals = null,
-        IReadOnlySet<string>? liveApps = null)
+        IReadOnlySet<string>? liveApps = null, string[]? sourceKeys = null)
     {
         AutoScaleDimensions = new SizeF(96f, 96f);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -95,6 +97,8 @@ sealed class OptionsDialog : Form
         _t = theme;
         _n = cals.Length;
         _cal = cals;
+        _sourceKeys = sourceKeys ?? Enumerable.Repeat("", cals.Length).ToArray();
+        _recordOriginal = cals.Select(c => c.Clone()).ToArray();
         _raw = raws;
         _outputs = outs;
         _categories = categories;
@@ -217,7 +221,7 @@ sealed class OptionsDialog : Form
 
         t.Controls.Add(new Label
         {
-            Text = $"ZMK Volume Fader  {MainForm.VersionText()}"
+            Text = $"DriftTrim  {MainForm.VersionText()}"
                  + "\nVibecoded by Aleblazer of Split Logic Keyboards",
             // AutoSize so both lines are always fully shown — a fixed height clipped
             // the second line at 125%+ scaling. Anchor.None centres it in the cell.
@@ -226,7 +230,7 @@ sealed class OptionsDialog : Form
         }, 0, 0);
 
         var icons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.None, BackColor = Color.Transparent, Margin = new Padding(0) };
-        var gh = new LinkIcon("https://github.com/Aleblazer/zmk-volume-fader", Icons.Path(Icons.GitHub))
+        var gh = new LinkIcon("https://github.com/Aleblazer/drifttrim", Icons.Path(Icons.GitHub))
         {
             Width = 24, Height = 24, Margin = new Padding(6, 0, 6, 0),
             BackColor = _t.Window, IconColor = _t.Subtle, HoverColor = _t.Text,
@@ -418,14 +422,15 @@ sealed class OptionsDialog : Form
         mutePanel.Controls.Add(new Label { Text = "Mute threshold", AutoSize = true, ForeColor = _t.Subtle, Margin = new Padding(0, 5, 8, 0) });
         var ms = new MainForm.Stepper
         {
-            Minimum = 0, Maximum = 300, Value = Math.Clamp(_cal[i].MuteRaw, 0, 300),
+            Minimum = 0, Maximum = FaderSourceLogic.IsMidi(_sourceKeys[i]) ? FaderSourceLogic.RawMaximum(_sourceKeys[i]) : 300,
+            Value = Math.Clamp(_cal[i].MuteRaw, 0, FaderSourceLogic.IsMidi(_sourceKeys[i]) ? FaderSourceLogic.RawMaximum(_sourceKeys[i]) : 300),
             BackColor = _t.CtlBg, ForeColor = _t.Text, BorderColor = _t.CtlBorder,
             ChevronColor = _t.Subtle, Surround = _t.Card,
         };
         ms.ValueChanged += (_, _) => { _cal[idx].MuteRaw = ms.Value; _lastRaw[idx] = int.MinValue; };
         _muteStep[i] = ms;
         mutePanel.Controls.Add(ms);
-        mutePanel.Controls.Add(new Label { Text = "(0 = off)", AutoSize = true, ForeColor = _t.Subtle, Margin = new Padding(6, 5, 0, 0) });
+        mutePanel.Controls.Add(new Label { Text = $"{FaderSourceLogic.Units(_sourceKeys[i])} (0 = off)", AutoSize = true, ForeColor = _t.Subtle, Margin = new Padding(6, 5, 0, 0) });
         _tip.SetToolTip(ms, "Raw threshold at the effective 0% endpoint after taper and inversion");
         t.Controls.Add(mutePanel, 0, 3);
         t.SetColumnSpan(mutePanel, 2);
@@ -477,6 +482,7 @@ sealed class OptionsDialog : Form
         _recording[i] = !_recording[i];
         if (_recording[i])
         {
+            _recordOriginal[i] = _cal[i].Clone();
             _priorSpans[i] = Math.Max(0, _cal[i].Max - _cal[i].Min);
             _captureSamples[i].Clear();
             _cal[i].Min = int.MaxValue;
@@ -487,9 +493,9 @@ sealed class OptionsDialog : Form
         }
         else
         {
-            if (_cal[i].Min > _cal[i].Max) { _cal[i].Min = 0; _cal[i].Max = 3250; }  // nothing swept
+            if (_cal[i].Max - (long)_cal[i].Min < 2) _cal[i] = _recordOriginal[i].Clone();
             _recordBtn[i].Text = "Record";
-            var quality = CalibrationCaptureLogic.Analyze(_captureSamples[i], _priorSpans[i]);
+            var quality = CalibrationCaptureLogic.Analyze(_captureSamples[i], _priorSpans[i], FaderSourceLogic.RawMaximum(_sourceKeys[i]));
             _qualityLbl[i].Text = quality.Message;
             _qualityLbl[i].ForeColor = quality.Good ? _t.Accent : Color.FromArgb(0xF0, 0x8A, 0x3C);
             _tip.SetToolTip(_qualityLbl[i], quality.SuggestedMuteRaw is int mute
@@ -508,12 +514,13 @@ sealed class OptionsDialog : Form
     {
         if (_virtual[i]) return;   // no calibration controls on a virtual fader
         int v = _raw[i]();
+        if (v == int.MinValue) { _rawLbl[i].Text = "Waiting for input…"; return; }
         if (_recording[i] && _captureSamples[i].Count < 4096) _captureSamples[i].Add(v);
         var spec = (_cal[i].Min, _cal[i].Max, _cal[i].Taper);
         bool curveChanged = !_previewCurveValid[i] || _previewCurveSpecs[i] != spec;
         if (v == _lastRaw[i] && !curveChanged) return;
         _lastRaw[i] = v;
-        _rawLbl[i].Text = $"raw {v}";
+        _rawLbl[i].Text = $"raw {v} {FaderSourceLogic.Units(_sourceKeys[i])}";
         if (_recording[i])
         {
             if (v < _cal[i].Min) _cal[i].Min = v;

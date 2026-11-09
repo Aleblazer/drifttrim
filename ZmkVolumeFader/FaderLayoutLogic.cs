@@ -4,7 +4,7 @@ internal readonly record struct PhysicalBinding(string DeviceKey, int Axis);
 
 internal static class FaderLayoutLogic
 {
-    public static string BindingKey(string deviceKey, int axis) => $"{deviceKey.Trim()}\n{axis}";
+    public static string BindingKey(string deviceKey, int axis) => FaderSourceLogic.BindingKey(deviceKey, axis);
 
     public static IReadOnlyList<PhysicalBinding> FindDuplicates(IEnumerable<PhysicalBinding> bindings)
     {

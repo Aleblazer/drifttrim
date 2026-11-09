@@ -1,6 +1,6 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
-  <Package Name="ZMK Volume Fader"
+  <Package Name="DriftTrim"
            Manufacturer="Aleblazer"
            Version="$(ProductVersion)"
            UpgradeCode="631B74C0-0F24-4A33-B22A-C8FEAE4C3FDC"
@@ -10,15 +10,16 @@
     <SummaryInformation Description="Control Windows audio with physical or virtual faders."
                         Manufacturer="Aleblazer" />
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of ZMK Volume Fader is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of DriftTrim is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="ApplicationIcon" SourceFile="..\ZmkVolumeFader\app.ico" />
     <Property Id="ARPPRODUCTICON" Value="ApplicationIcon" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/Aleblazer/zmk-volume-fader/issues" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Aleblazer/zmk-volume-fader" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Aleblazer/drifttrim/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Aleblazer/drifttrim" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
+      <!-- Preserve the install path and component identity for existing installations. -->
       <Directory Id="INSTALLFOLDER" Name="ZMK Volume Fader">
         <Component Id="ApplicationFiles" Guid="9681CB01-3C95-4321-828C-399553650ABF" Bitness="always64">
           <File Id="ApplicationExecutable"
@@ -26,7 +27,7 @@
                 KeyPath="yes">
             <Shortcut Id="StartMenuShortcut"
                       Directory="ProgramMenuFolder"
-                      Name="ZMK Volume Fader"
+                      Name="DriftTrim"
                       Description="Control Windows audio with physical or virtual faders"
                       Advertise="yes"
                       WorkingDirectory="INSTALLFOLDER" />
@@ -36,7 +37,7 @@
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
-    <Feature Id="Complete" Title="ZMK Volume Fader" Level="1">
+    <Feature Id="Complete" Title="DriftTrim" Level="1">
       <ComponentRef Id="ApplicationFiles" />
     </Feature>
 
